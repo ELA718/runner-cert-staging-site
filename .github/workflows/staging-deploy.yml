@@ -23,7 +23,9 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: ["agr-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}-validation-linux-deployment"]
+    # The deployment role exists only on the native macOS slots (Nexus, Nixon),
+    # which follow the mac role label convention in role-mac-canary.yml.
+    runs-on: ["agr-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}-validation-deployment"]
     timeout-minutes: 12
     steps:
       - name: Verify isolated assignment and resource boundaries
