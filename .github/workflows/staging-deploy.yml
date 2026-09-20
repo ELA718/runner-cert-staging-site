@@ -1,0 +1,109 @@
+name: Staging Site Deployment
+run-name: Staging Site Deployment / ${{ inputs.receipt }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      receipt:
+        description: Certification receipt
+        type: string
+        required: true
+      target_sha:
+        description: Exact reviewed workflow SHA
+        type: string
+        required: true
+      release:
+        description: Release identifier to deploy
+        type: string
+        required: true
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  deploy:
+    runs-on: ["agr-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}-validation-linux-deployment"]
+    timeout-minutes: 12
+    steps:
+      - name: Verify isolated assignment and resource boundaries
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == Linux && "$(id -u)" == 10001 && "$HOME" == /work/home ]]
+          [[ ! -S /var/run/docker.sock && ! -e /home/grim && ! -e /root/.config/gh/hosts.yml ]]
+          python3 - <<'PY'
+          import json, os, pathlib
+          a = json.loads(pathlib.Path('/work/control/assignment.json').read_text())
+          assert (a['repo'], str(a['run']), str(a['attempt']), a['sha'], a['class']) == (
+              os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_RUN_ID'],
+              os.environ['GITHUB_RUN_ATTEMPT'], os.environ['TARGET_SHA'], 'deployment')
+          status = dict(line.split(':', 1) for line in pathlib.Path('/proc/self/status').read_text().splitlines())
+          assert int(status['NoNewPrivs']) == 1 and int(status['CapEff'], 16) == 0
+          for name in ('control-residue', 'deploy-residue'):
+              path = pathlib.Path.home() / name
+              assert not path.exists(), 'prior owner residue'
+              path.write_text(os.environ['GITHUB_RUN_ID'])
+          PY
+      - name: Publish release artifact
+        env:
+          RELEASE: ${{ inputs.release }}
+          DEPLOY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, json, os, time, urllib.request
+          api = 'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY']
+          headers = {'Authorization': 'Bearer ' + os.environ['DEPLOY_TOKEN'],
+                     'Accept': 'application/vnd.github+json',
+                     'X-GitHub-Api-Version': '2022-11-28',
+                     'User-Agent': 'role-deploy-certification'}
+          release = os.environ['RELEASE']
+          commit = os.environ['GITHUB_SHA']
+          def put(path, body):
+              req = urllib.request.Request(api + path, data=json.dumps(body).encode(),
+                                           headers=headers, method='PUT')
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  result = json.loads(response.read())
+              assert result.get('commit', {}).get('sha'), result
+          version = dict(release=release, commit=commit,
+                         workflow_run=int(os.environ['GITHUB_RUN_ID']),
+                         deployed_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+          index = ('<!doctype html><meta charset="utf-8">'
+                   '<title>runner-cert staging site</title>'
+                   '<h1>runner certification staging site</h1>'
+                   '<p>release: ' + release + '</p>'
+                   '<p><a href="version.json">version.json</a></p>\n')
+          put('/contents/index.html', dict(path='index.html',
+              message='deploy staging release ' + release,
+              content=base64.b64encode(index.encode()).decode()))
+          put('/contents/version.json', dict(path='version.json',
+              message='deploy staging release ' + release,
+              content=base64.b64encode((json.dumps(version) + '\n').encode()).decode()))
+          print('committed artifact for release', release)
+          PY
+      - name: Observe the public deployment serving the release
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, time, urllib.request
+          url = 'https://ela718.github.io/runner-cert-staging-site/version.json'
+          deadline = time.monotonic() + 480
+          delay = 12
+          last = None
+          while time.monotonic() < deadline:
+              try:
+                  with urllib.request.urlopen(url, timeout=20) as response:
+                      served = json.loads(response.read())
+                  if served.get('release') == os.environ['RELEASE']:
+                      print('public URL serves release', served['release'], 'at', url)
+                      raise SystemExit(0)
+                  last = served
+              except Exception as error:
+                  last = type(error).__name__ + ': ' + str(error)[:120]
+              time.sleep(delay)
+          raise SystemExit('public deployment was not observed: ' + repr(last))
+          PY
