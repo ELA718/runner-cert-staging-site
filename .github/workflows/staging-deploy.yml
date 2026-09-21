@@ -23,8 +23,9 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
   pages: write
+  id-token: write
 
 jobs:
   deploy:
@@ -63,36 +64,15 @@ jobs:
               path.write_text(os.environ['GITHUB_RUN_ID'])
           PY
           fi
-      - name: Publish release artifact
+      - name: Build release artifact on the admitted runner
         env:
           RELEASE: ${{ inputs.release }}
-          DEPLOY_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
           python3 - <<'PY'
-          import base64, html, json, os, re, time, urllib.error, urllib.request
-          api = 'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY']
-          headers = {'Authorization': 'Bearer ' + os.environ['DEPLOY_TOKEN'],
-                     'Accept': 'application/vnd.github+json',
-                     'X-GitHub-Api-Version': '2022-11-28',
-                     'User-Agent': 'role-deploy-certification'}
+          import html, io, json, os, pathlib, re, tarfile, time
           release = os.environ['RELEASE']
           assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,119}', release)
-          commit = os.environ['GITHUB_SHA']
-          def put(path, body):
-              try:
-                  with urllib.request.urlopen(urllib.request.Request(api + path, headers=headers), timeout=30) as response:
-                      existing = json.loads(response.read())
-                  body['sha'] = existing['sha']
-              except urllib.error.HTTPError as error:
-                  if error.code != 404:
-                      raise
-              req = urllib.request.Request(api + path, data=json.dumps(body).encode(),
-                                           headers=headers, method='PUT')
-              with urllib.request.urlopen(req, timeout=30) as response:
-                  result = json.loads(response.read())
-              assert result.get('commit', {}).get('sha'), result
-          version = dict(release=release, commit=commit,
+          version = dict(release=release, commit=os.environ['GITHUB_SHA'],
                          workflow_run=int(os.environ['GITHUB_RUN_ID']),
                          deployed_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
           index = ('<!doctype html><meta charset="utf-8">'
@@ -100,14 +80,23 @@ jobs:
                    '<h1>runner certification staging site</h1>'
                    '<p>release: ' + html.escape(release) + '</p>'
                    '<p><a href="version.json">version.json</a></p>\n')
-          put('/contents/index.html', dict(path='index.html',
-              message='deploy staging release ' + release,
-              content=base64.b64encode(index.encode()).decode()))
-          put('/contents/version.json', dict(path='version.json',
-              message='deploy staging release ' + release,
-              content=base64.b64encode((json.dumps(version) + '\n').encode()).decode()))
-          print('committed artifact for release', release)
+          files = {'index.html': index.encode(), 'version.json': (json.dumps(version) + '\n').encode()}
+          # Match the Pages artifact format without requiring GNU tar on Macs.
+          with tarfile.open(pathlib.Path(os.environ['RUNNER_TEMP'])/'artifact.tar', 'w') as archive:
+              for name, content in files.items():
+                  member = tarfile.TarInfo(name)
+                  member.size, member.mode = len(content), 0o644
+                  archive.addfile(member, io.BytesIO(content))
           PY
+      - name: Upload Pages artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
+      - name: Deploy Pages artifact
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
       - name: Observe the public deployment serving the release
         env:
           RELEASE: ${{ inputs.release }}
