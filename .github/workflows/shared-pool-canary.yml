@@ -1,0 +1,136 @@
+name: Shared Pool Canary
+run-name: Shared Pool Canary / ${{ inputs.receipt }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      receipt:
+        description: Unique certification receipt
+        type: string
+        required: true
+      target_sha:
+        description: Exact trusted repository commit
+        type: string
+        required: true
+      lanes:
+        description: JSON matrix with class and lane for each job
+        type: string
+        default: '{"include":[{"class":"standard","lane":1}]}'
+      hold_seconds:
+        description: Bounded occupancy hold
+        type: number
+        default: 0
+      full_ci:
+        description: Run complete regression checks on one native Mac heavy lane
+        type: boolean
+        default: false
+      platform:
+        description: Certified execution platform
+        type: choice
+        options: [macos, linux, portable]
+        default: macos
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.lanes) }}
+    runs-on: ["agr-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}-validation-${{ inputs.platform == 'linux' && 'linux-' || inputs.platform == 'portable' && 'portable-' || '' }}${{ matrix.class }}"]
+    timeout-minutes: 20
+    steps:
+      - name: Verify repository and isolated slot
+        shell: bash
+        env:
+          RECEIPT: ${{ inputs.receipt }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          REQUESTED_CLASS: ${{ matrix.class }}
+          LANE: ${{ matrix.lane }}
+          REQUESTED_PLATFORM: ${{ inputs.platform }}
+          FULL_CI: ${{ inputs.full_ci }}
+        run: |
+          set -euo pipefail
+          [[ "$RECEIPT" =~ ^[A-Za-z0-9._:-]+$ && ${#RECEIPT} -le 120 ]]
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" == "$TARGET_SHA" ]]
+          [[ "$GITHUB_REPOSITORY" =~ ^(ELA718|AgentRoles)/[A-Za-z0-9_.-]+$ ]]
+          if [[ "$FULL_CI" == true ]]; then
+            [[ "$REQUESTED_PLATFORM" == macos && "$REQUESTED_CLASS" == heavy && "$LANE" == 1 ]]
+          fi
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ && "$LANE" =~ ^[1-9][0-9]*$ ]]
+          if [[ "$REQUESTED_PLATFORM" == linux || ( "$REQUESTED_PLATFORM" == portable && "$RUNNER_OS" == Linux ) ]]; then
+            [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]
+            [[ "$(id -un)" == agrrunner && "$HOME" == /home/agrrunner && "$(id -u)" -ne 0 ]]
+            [[ "$(stat -c %a "$HOME")" == 700 ]]
+            [[ "$REQUESTED_CLASS" == standard || "$REQUESTED_CLASS" == heavy ]]
+            if [[ "$RUNNER_NAME" =~ ^(home|work)-runner-([1-9]|1[0-9]|2[0-5])$ ]]; then
+              export CANARY_ROOT=/opt/agr-home
+              [[ ! -w "$CANARY_ROOT/guest.py" && ! -r /home/grim/.config/gh/hosts.yml && ! -r /home/grim/.ssh/id_ed25519 ]]
+              /usr/bin/python3 -I -c 'import json,os; a=json.load(open("/opt/agr-home/assignment.json")); assert a["node"]+"-runner-"+str(a["slot"])==os.environ["RUNNER_NAME"]; assert a["class"]==("standard" if a["slot"]<=20 else "heavy")==os.environ["REQUESTED_CLASS"]; assert (a["repo"],str(a["run"]),str(a["attempt"]),a["sha"])==(os.environ["GITHUB_REPOSITORY"],os.environ["GITHUB_RUN_ID"],os.environ["GITHUB_RUN_ATTEMPT"],os.environ["GITHUB_SHA"]); m=[int(x) for x in open("/proc/self/uid_map").read().split()]; assert len(m)==3 and m[0]==0 and m[1]>=131072 and m[2]==262144'
+            else
+              [[ "$RUNNER_NAME" =~ ^box-runner-([1-9]|10)$ ]]
+              export CANARY_ROOT=/opt/agr-box
+              [[ ! -w "$CANARY_ROOT/bootstrap.py" ]]
+              /usr/bin/python3 -I -c 'import json,os; a=json.load(open("/opt/agr-box/assignment.json")); assert a["class"]==os.environ["REQUESTED_CLASS"] and "box-runner-"+str(a["slot"])==os.environ["RUNNER_NAME"]'
+            fi
+            groups=" $(id -Gn) "
+            [[ "$groups" != *' sudo '* && "$groups" != *' docker '* && "$groups" != *' root '* ]]
+            ! sudo -n /usr/bin/true >/dev/null 2>&1
+            [[ ! -w "$CANARY_ROOT/pre-job.sh" && ! -w "$CANARY_ROOT/assignment.json" ]]
+            [[ ! -r /home/user/.config/gh/hosts.yml && ! -r /home/user/.ssh/id_ed25519 ]]
+            [[ -z "${BOX_API_KEY:-}" && -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" && -z "${ACTIONS_RUNNER_INPUT_TOKEN:-}" ]]
+            touch "$HOME/isolation-probe-$RECEIPT"
+          else
+          [[ ( "$REQUESTED_PLATFORM" == macos || "$REQUESTED_PLATFORM" == portable ) && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$RUNNER_NAME" =~ ^(eis|jezebel|juno|levi|nexus|nixon)-runner-([1-5])$ ]]
+          node=${BASH_REMATCH[1]}; slot=${BASH_REMATCH[2]}
+          expected_class=standard
+          [[ "$slot" != 5 ]] || expected_class=heavy
+          [[ "$REQUESTED_CLASS" == "$expected_class" ]]
+          [[ "$(id -un)" == "_agrrunner$slot" && "$HOME" == "/Users/_agrrunner$slot" ]]
+          [[ "$(id -u)" -ge 400 && "$(id -u)" -le 499 ]]
+          groups=" $(id -Gn) "
+          [[ "$groups" != *' admin '* && "$groups" != *' staff '* && "$groups" != *' wheel '* ]]
+          ! sudo -n /usr/bin/true >/dev/null 2>&1
+          control=$node
+          [[ "$node" != nexus ]] || control=finch
+          [[ ! -r "/Users/$control/.config/gh/hosts.yml" && ! -r "/Users/$control/.ssh/agentroles-peer-ed25519" ]]
+          touch "$HOME/actions-runner/isolation-probe-$RECEIPT"
+          fi
+          printf 'repository=%s run=%s attempt=%s runner=%s class=%s lane=%s sha=%s\n' \
+            "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME" "$REQUESTED_CLASS" "$LANE" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Hold for shared pool proof
+        shell: bash
+        env:
+          HOLD_SECONDS: ${{ inputs.hold_seconds }}
+        run: |
+          set -euo pipefail
+          [[ "$HOLD_SECONDS" =~ ^[0-9]+$ && "$HOLD_SECONDS" -le 900 ]] || exit 1
+          sleep "$HOLD_SECONDS"
+      - name: Checkout exact regression source
+        if: ${{ inputs.full_ci }}
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Complete regression suite
+        if: ${{ inputs.full_ci }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          python3 ./ci-checks.py --results "$RUNNER_TEMP/checks"
+      - name: Full regression evidence
+        if: ${{ always() && inputs.full_ci }}
+        shell: bash
+        run: |
+          if [[ -d "$RUNNER_TEMP/checks" ]]; then
+            for receipt in "$RUNNER_TEMP"/checks/*.json; do
+              [[ -f "$receipt" ]] || continue
+              cat "$receipt"
+            done
+            for log in "$RUNNER_TEMP"/checks/*.log; do
+              [[ -f "$log" ]] || continue
+              cat "$log"
+            done
+          fi
